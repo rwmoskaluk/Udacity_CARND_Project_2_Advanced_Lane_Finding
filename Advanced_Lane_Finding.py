@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from moviepy.editor import VideoFileClip
 # from IPython.display import HTML
 from IPython import get_ipython
+from Line import Line
+from Camera import Camera
 
 ipy = get_ipython()
 if ipy is not None:
@@ -265,11 +267,57 @@ def perspective_transform_step(img, visualize=False):
     return warped_img, m, minv
 
 
-def lane_detection_step(img, visualize=False):
+def lane_detection_step(img, use_previous, left, right, visualize=False):
     # detects lane boundaries and fits lines to them
-    output_img, ploty_px, leftx_fit_px, rightx_fit_px, leftx_fit_cr, rightx_fit_cr, center = fit_polynomial(img)
+    output_img, ploty_px, leftx_fit_px, rightx_fit_px, leftx_fit_cr, rightx_fit_cr, \
+    center, leftx, lefty, rightx, righty, left_fit, right_fit = fit_polynomial(img, use_previous, left, right)
+
     left_curve_radius, right_curve_radius = measure_curvature(ploty_px, leftx_fit_cr, rightx_fit_cr)
-    # fig = []
+
+    # check lane detector was successful based on known information for a lane
+    lane_detected = detection_checker(img, ploty_px, left_fit, right_fit, left_curve_radius, right_curve_radius)
+
+    if lane_detected is True:
+        # use new values for this frame
+        left.detected = True
+        right.detected = True
+
+        left.recent_xfitted.append(leftx_fit_px)
+        right.recent_xfitted.append(rightx_fit_px)
+
+        left.allx = leftx
+        right.allx = rightx
+
+        left.ally = lefty
+        right.ally = righty
+
+        left.diffs = left.current_fit - left_fit
+        right.diffs = right.current_fit - right_fit
+
+        left.current_fit = left_fit
+        right.current_fit = right_fit
+
+        left.line_base_pos = center
+        right.line_base_pos = center
+
+        left.radius_of_curvature = left_curve_radius
+        right.radius_of_curvature = right_curve_radius
+
+        left.average_iterations()
+        right.average_iterations()
+
+    else:
+        # use previous frame information
+        if left.iter != 0 and right.iter != 0 and left.bestx is not None:
+            leftx_fit_px = left.bestx
+            rightx_fit_px = right.bestx
+            center = left.line_base_pos
+
+        right.detected = False
+        left.detected = False
+        left.bad_iters.append(left.iter)
+        right.bad_iters.append(right.iter)
+
     if visualize is True:
         print(left_curve_radius, 'm', right_curve_radius, 'm')
         print(center, 'm')
@@ -281,80 +329,12 @@ def lane_detection_step(img, visualize=False):
         plt.savefig('output_images/lane_detected.png', bbox_inches='tight')
         plt.show()
 
-    return leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve_radius, right_curve_radius
+    return leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve_radius, right_curve_radius, left, right
 
 
-def sliding_window(img, nwindows=9, margin=100, minpix=50):
-    bottom_half = img[img.shape[0] // 2:, :]
-
-    # Sum across image pixels vertically - make sure to set an `axis`
-    # i.e. the highest areas of vertical lines should be larger values
-    histogram = np.sum(bottom_half, axis=0)
-    output_img = np.dstack((img, img, img))
-    midpoint = np.int(histogram.shape[0] / 2)
-    leftx_base = np.argmax(histogram[:midpoint])
-    rightx_base = np.argmax(histogram[midpoint:]) + midpoint
-
-    window_height = np.int(img.shape[0] // nwindows)
-    nonzero = img.nonzero()
-    nonzerox = np.array(nonzero[1])
-    nonzeroy = np.array(nonzero[0])
-
-    leftx_current = leftx_base
-    rightx_current = rightx_base
-
-    left_lane_inds = []
-    right_lane_inds = []
-    # Step through the windows one by one
-    for window in range(nwindows):
-        # Identify window boundaries in x and y (and right and left)
-        win_y_low = output_img.shape[0] - (window + 1) * window_height
-        win_y_high = output_img.shape[0] - window * window_height
-        win_xleft_low = leftx_current - margin
-        win_xleft_high = leftx_current + margin
-        win_xright_low = rightx_current - margin
-        win_xright_high = rightx_current + margin
-
-        # Draw the windows on the visualization image
-        cv2.rectangle(output_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 120, 0), 2)
-        cv2.rectangle(output_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 120, 0), 2)
-
-        # Identify the nonzero pixels in x and y within the window #
-        good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                          (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
-        good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                           (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
-
-        # Append these indices to the lists
-        left_lane_inds.append(good_left_inds)
-        right_lane_inds.append(good_right_inds)
-
-        # If you found > minpix pixels, recenter next window on their mean position
-        if len(good_left_inds) > minpix:
-            leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
-        if len(good_right_inds) > minpix:
-            rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
-
-    # Concatenate the arrays of indices (previously was a list of lists of pixels)
-    try:
-        left_lane_inds = np.concatenate(left_lane_inds)
-        right_lane_inds = np.concatenate(right_lane_inds)
-    except ValueError:
-        # Avoids an error if the above is not implemented fully
-        pass
-
-    # Extract left and right line pixel positions
-    leftx = nonzerox[left_lane_inds]
-    lefty = nonzeroy[left_lane_inds]
-    rightx = nonzerox[right_lane_inds]
-    righty = nonzeroy[right_lane_inds]
-
-    return leftx, lefty, rightx, righty, output_img
-
-
-def fit_polynomial(img, ym_per_pix=15 / 720, xm_per_pix=3.7 / 950):
+def fit_polynomial(img, use_previous, left, right, ym_per_pix=15 / 720, xm_per_pix=3.7 / 950):
     # Find our lane pixels first
-    leftx, lefty, rightx, righty, out_img = sliding_window(img)
+    leftx, lefty, rightx, righty, out_img = sliding_window(img, use_previous, left, right)
 
     # Fit a second order polynomial to each using `np.polyfit`
     left_fit = np.polyfit(lefty, leftx, 2)
@@ -384,7 +364,87 @@ def fit_polynomial(img, ym_per_pix=15 / 720, xm_per_pix=3.7 / 950):
     out_img[lefty, leftx] = [120, 0, 0]
     out_img[righty, rightx] = [0, 0, 120]
 
-    return out_img, ploty, left_fitx, right_fitx, left_fit_cr, right_fit_cr, center
+    return out_img, ploty, left_fitx, right_fitx, left_fit_cr, right_fit_cr, center, leftx, lefty, rightx, righty, \
+           left_fit, right_fit
+
+
+def sliding_window(img, use_previous, left, right, nwindows=9, margin=100, minpix=50):
+    output_img = np.dstack((img, img, img))
+    window_height = np.int(img.shape[0] // nwindows)
+    nonzero = img.nonzero()
+    nonzerox = np.array(nonzero[1])
+    nonzeroy = np.array(nonzero[0])
+    left_lane_inds = []
+    right_lane_inds = []
+
+    if use_previous is False:
+        bottom_half = img[img.shape[0] // 2:, :]
+
+        # Sum across image pixels vertically - make sure to set an `axis`
+        # i.e. the highest areas of vertical lines should be larger values
+        histogram = np.sum(bottom_half, axis=0)
+        midpoint = np.int(histogram.shape[0] / 2)
+        leftx_base = np.argmax(histogram[:midpoint])
+        rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+        leftx_current = leftx_base
+        rightx_current = rightx_base
+
+    else:
+        margin = 30
+        nwindows = 9
+        leftx_current = int(np.polyval(left.current_fit, output_img.shape[1]))
+        rightx_current = int(np.polyval(right.current_fit, output_img.shape[1]))
+
+    # Step through the windows one by one
+    for window in range(nwindows):
+        # Identify window boundaries in x and y (and right and left)
+        win_y_low = output_img.shape[0] - (window + 1) * window_height
+        win_y_high = output_img.shape[0] - window * window_height
+        win_xleft_low = leftx_current - margin
+        win_xleft_high = leftx_current + margin
+        win_xright_low = rightx_current - margin
+        win_xright_high = rightx_current + margin
+
+        # Draw the windows on the visualization image
+        cv2.rectangle(output_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 120, 0), 2)
+        cv2.rectangle(output_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 120, 0), 2)
+
+        # Identify the nonzero pixels in x and y within the window #
+        good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                          (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+        good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                           (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+
+        # Append these indices to the lists
+        left_lane_inds.append(good_left_inds)
+        right_lane_inds.append(good_right_inds)
+
+        if use_previous is False:
+            # If you found > minpix pixels, recenter next window on their mean position
+            if len(good_left_inds) > minpix:
+                leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+            if len(good_right_inds) > minpix:
+                rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+        else:
+            leftx_current = int(np.polyval(left.current_fit, win_y_low))
+            rightx_current = int(np.polyval(right.current_fit, win_y_low))
+
+    # Concatenate the arrays of indices (previously was a list of lists of pixels)
+    try:
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+    except ValueError:
+        # Avoids an error if the above is not implemented fully
+        pass
+
+    # Extract left and right line pixel positions
+    leftx = nonzerox[left_lane_inds]
+    lefty = nonzeroy[left_lane_inds]
+    rightx = nonzerox[right_lane_inds]
+    righty = nonzeroy[right_lane_inds]
+
+    return leftx, lefty, rightx, righty, output_img
 
 
 def measure_curvature(ploty, left_fit, right_fit, ym_per_pix=15 / 720, xm_per_pix=3.7 / 950):
@@ -408,9 +468,11 @@ def measure_lane_center(left_fit, right_fit, img_center_x, xm_per_pix=3.7 / 950)
     # compare to center of image
     # convert to meters from pixel space and this is distance offset
     y_eval = 720
-    a = left_fit[0] * (y_eval ** 2) + left_fit[1] * y_eval + left_fit[2]
-    b = right_fit[0] * (y_eval ** 2) + right_fit[1] * y_eval + right_fit[2]
-    calculated_center = (a + b)/2
+    a = np.polyval(left_fit, y_eval)
+    b = np.polyval(right_fit, y_eval)
+    # a = left_fit[0] * (y_eval ** 2) + left_fit[1] * y_eval + left_fit[2]
+    # b = right_fit[0] * (y_eval ** 2) + right_fit[1] * y_eval + right_fit[2]
+    calculated_center = (a + b) / 2
 
     center = (img_center_x - calculated_center) * xm_per_pix
 
@@ -442,18 +504,52 @@ def visualize_step(img, warped, minv, left_fitx, right_fitx, ploty, visualize=Fa
     return result
 
 
-def detection_checker():
-    # checks to see if detection was good
-    # 1) Parallel check between lane lines
-    #   1a) If failed use previous frame information
-    # 2) Store last N detections
-    #   2a) Average filter these for smoothing
-    # 3) Narrow search space of next frame immediately based on previous frame success
-    #   3a) If in between window not inline then utilize previous and future window areas to interpolate
-    pass
+def detection_checker(img, ploty_px, leftx_fit, rightx_fit, left_curve_radius, right_curve_radius):
+    detection_results_parallel = False
+    detection_results_curve = False
+    detection_results_width = False
+    # check bottom, middle, and top points on both curves and validate that they are all within some %
+
+    y_coords = [img.shape[1], img.shape[1] / 3]
+    left_values = np.polyval(leftx_fit, y_coords)
+    right_values = np.polyval(rightx_fit, y_coords)
+
+    distances = abs(right_values - left_values)
+
+    percent_diff_parallel = (abs(distances[0] - distances[1]) /
+                             ((distances[0] + distances[1]) / 2)) * 100
+
+    if percent_diff_parallel <= 15:
+        detection_results_parallel = True
+
+    percent_diff_curve = (abs(left_curve_radius - right_curve_radius) /
+                          ((left_curve_radius + right_curve_radius) / 2)) * 100
+
+    if percent_diff_curve <= 15:
+        detection_results_curve = True
+
+    if (0.9 * 3.7) <= (distances[0] * 3.7 / 950) < (1.1 * 3.7):
+        detection_results_width = True
+
+    detection_results = (detection_results_curve or detection_results_parallel) and detection_results_width
+
+    return detection_results
 
 
-def part_1_testing():
+def look_ahead(left, right):
+    """
+    Method for looking ahead and limiting the search zone in the next frame for searching for the lane lines
+    :return:
+    """
+    use_previous = False
+    if right.iter != 0 and left.iter != 0:
+        if right.detected is True and left.detected is True:
+            use_previous = True
+
+    return use_previous
+
+
+def part_1_testing(left, right):
     # runs the testing for the pipeline
     [ret, mtx, dist] = calibration_step(visualize=False)
     print("ret (reprojection error): {}".format(ret))
@@ -464,45 +560,74 @@ def part_1_testing():
     img = cv2.imread('test_images/test1.jpg')
     calibrated_img = calibration_applied_step(img, mtx, dist, visualize=False)
     thresh_img = threshold_step(calibrated_img, visualize=False)
-    warped_img, m, minv = perspective_transform_step(thresh_img, visualize=True)
-    leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve, right_curve = lane_detection_step(warped_img,
-                                                                                                 visualize=True)
+    warped_img, m, minv = perspective_transform_step(thresh_img, visualize=False)
+    leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve, right_curve, left, right = lane_detection_step(
+        warped_img,
+        False,
+        left,
+        right,
+        visualize=True)
     result = visualize_step(calibrated_img, warped_img, minv, leftx_fit_px, rightx_fit_px, ploty_px, visualize=True)
-    pipeline(img)
     print('Worked!')
 
 
-def part_2_production():
+def part_2_production(left, right, camera):
     # runs the videos in production utilizing the pipeline
     video_output = 'output_videos/project_video_output.mp4'
-    clip1 = VideoFileClip("project_video.mp4").subclip(0, 4)
-    detected_clip = clip1.fl_image(pipeline)  # NOTE: this function expects color images!!
+    # clip1 = VideoFileClip("project_video.mp4").subclip(39, 43)
+    clip1 = VideoFileClip("project_video.mp4")
+    detected_clip = clip1.fl_image(
+        lambda image: video_process(image, left, right, camera))  # NOTE: this function expects color images!!
     # get_ipython().run_line_magic('time', 'detected_clip.write_videofile(video_output, audio=False)')
     detected_clip.write_videofile(video_output)
 
 
-def part_optional_production():
+def part_optional_production(left, right, camera):
     # runs the videos in production utilizing the pipeline
-    video_output = '/home/workspace/CarND-Advanced-Lane-Lines/output_videos/challenge_video.mp4'
-    clip1 = VideoFileClip("/home/workspace/CarND-Advanced-Lane-Lines/challenge_video.mp4")
-    detected_clip = clip1.fl_image(pipeline)  # NOTE: this function expects color images!!
-    # get_ipython().run_line_magic('time', 'detected_clip.write_videofile(video_output, audio=False)')
+    video_output = 'output_videos/challenge_video_output.mp4'
+    clip1 = VideoFileClip("challenge_video.mp4")
+    detected_clip = clip1.fl_image(
+        lambda image: video_process(image, left, right,
+                                    camera))  # NOTE: this function expects color images!!
+    #  get_ipython().run_line_magic('time', 'detected_clip.write_videofile(video_output, audio=False)')
     detected_clip.write_videofile(video_output)
 
 
-def pipeline(img, first_pass=True):
-    # the pipeline for image processing and lane detection
-    if first_pass:
-        [ret, mtx, dist] = calibration_step(visualize=False)
-        first_pass = False
+def part_optional_production_2(left, right, camera):
+    # runs the videos in production utilizing the pipeline
+    video_output = 'output_videos/harder_challenge_video_output.mp4'
+    clip1 = VideoFileClip("harder_challenge_video.mp4")
+    detected_clip = clip1.fl_image(
+        lambda image: video_process(image, left, right,
+                                    camera))  # NOTE: this function expects color images!!
+    #  get_ipython().run_line_magic('time', 'detected_clip.write_videofile(video_output, audio=False)')
+    detected_clip.write_videofile(video_output)
 
-    calibrated_img = calibration_applied_step(img, mtx, dist, visualize=False)
+
+def pipeline(img, right, left, camera):
+    # the pipeline for image processing and lane detection
+
+    # calibrate the image based on the calculated distortion parameters
+    calibrated_img = calibration_applied_step(img, camera.mtx, camera.dist, visualize=False)
+    # threshold the image based on the chosen threshold techniques and values
     thresh_img = threshold_step(calibrated_img, visualize=False)
+    # warp the image to a bird's eye view
     warped_img, m, minv = perspective_transform_step(thresh_img, visualize=False)
-    leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve, right_curve = lane_detection_step(warped_img,
-                                                                                                 visualize=False)
+
+    # detect the lane
+    use_previous = look_ahead(left, right)
+    leftx_fit_px, rightx_fit_px, ploty_px, center, left_curve, right_curve, left, right = lane_detection_step(
+        warped_img,
+        use_previous,
+        left,
+        right,
+        visualize=False)
+
+    # visualize the results
     result = visualize_step(calibrated_img, warped_img, minv, leftx_fit_px, rightx_fit_px, ploty_px, visualize=False)
 
+    left.iter += 1
+    right.iter += 1
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 1
     font_color = (255, 255, 255)
@@ -517,7 +642,21 @@ def pipeline(img, first_pass=True):
     return result
 
 
+def video_process(img, left, right, camera):
+    result = pipeline(img, left, right, camera)
+
+    return result
+
+
 if __name__ == "__main__":
-    part_1_testing()
-    # part_2_production()
-    # part_optional_production()
+    right_line = Line()
+    left_line = Line()
+    [ret, mtx, dist] = calibration_step(visualize=False)
+    camera_model = Camera(ret, mtx, dist)
+    # part_1_testing(left_line, right_line)
+    # part_2_production(left_line, right_line, camera_model) # 17.6% were bad frames
+    # part_optional_production(left_line, right_line, camera_model) # 86.0% were bad frames
+    # part_optional_production_2(left_line, right_line, camera_model) # 83.6% were bad frames
+
+    print("Left Failed to detect frames = {0:2f}".format((len(left_line.bad_iters)/left_line.iter)*100))
+    print("Right Failed to detect frames = {0:2f}".format((len(right_line.bad_iters)/right_line.iter)*100))
