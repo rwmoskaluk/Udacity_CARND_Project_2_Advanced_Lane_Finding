@@ -52,7 +52,7 @@ The final function in the processing pipeline is visualize_step().  This step ta
 ![Alt text](output_images/lane_detected_final.png?raw=true "Final Results")
 
 #### Example output
-<img src="output_videos/project_video.gif?raw=true" width="200px">
+<img src="output_videos/project_video.gif?raw=true" width="720px">
 
 
 ## Issues/Improvements
